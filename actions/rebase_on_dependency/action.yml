@@ -1,0 +1,159 @@
+# *******************************************************************************
+# Copyright (c) 2024 Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+# *******************************************************************************
+
+name: "Rebase on Dependency PR"
+description: "Rebases the current PR onto another PR specified via 'Depends-On: #<PR_NUMBER>' in the PR description"
+
+branding:
+  icon: git-merge
+  color: gray-dark
+
+inputs:
+  token:
+    description: "GitHub token with permissions to read PR information"
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  dependency_pr:
+    description: "The PR number that this PR depends on (if found)"
+    value: ${{ steps.find-dependency.outputs.dependency_pr }}
+  rebased:
+    description: "Whether a rebase was performed"
+    value: ${{ steps.rebase.outputs.rebased }}
+
+runs:
+  using: composite
+  steps:
+    - name: Find dependency PR from description
+      id: find-dependency
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        # Only run for pull request events
+        if [[ "${{ github.event_name }}" != "pull_request" && "${{ github.event_name }}" != "merge_group" ]]; then
+          echo "Not a pull request event, skipping dependency check"
+          echo "dependency_pr=" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        # Get PR number from context
+        PR_NUMBER="${{ github.event.pull_request.number }}"
+
+        if [[ -z "$PR_NUMBER" ]]; then
+          echo "Could not determine PR number"
+          echo "dependency_pr=" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        echo "Checking PR #${PR_NUMBER} for dependencies..."
+
+        # Fetch PR description using GitHub CLI
+        PR_BODY=$(gh pr view "$PR_NUMBER" --json body --jq '.body' 2>/dev/null || echo "")
+
+        if [[ -z "$PR_BODY" ]]; then
+          echo "Could not fetch PR description or description is empty"
+          echo "dependency_pr=" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        # Look for "Depends-On:" pattern in the PR description
+        # Supports formats: "Depends-On: #123", "Depends-On: 123", "Depends-On:#123"
+        DEPENDENCY_PR=$(echo "$PR_BODY" | grep -ioE 'Depends-On:[[:space:]]*#?[0-9]+' | head -1 | grep -oE '[0-9]+' || echo "")
+
+        if [[ -z "$DEPENDENCY_PR" ]]; then
+          echo "No 'Depends-On:' keyword found in PR description"
+          echo "dependency_pr=" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        echo "Found dependency on PR #${DEPENDENCY_PR}"
+        echo "dependency_pr=${DEPENDENCY_PR}" >> $GITHUB_OUTPUT
+
+    - name: Rebase on dependency PR
+      id: rebase
+      if: steps.find-dependency.outputs.dependency_pr != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        DEPENDENCY_PR: ${{ steps.find-dependency.outputs.dependency_pr }}
+      run: |
+        echo "Rebasing on PR #${DEPENDENCY_PR}..."
+
+        # Get the head ref (branch name) of the dependency PR
+        DEPENDENCY_BRANCH=$(gh pr view "$DEPENDENCY_PR" --json headRefName --jq '.headRefName' 2>/dev/null || echo "")
+
+        if [[ -z "$DEPENDENCY_BRANCH" ]]; then
+          echo "::error::Could not fetch branch name for PR #${DEPENDENCY_PR}. Make sure the PR exists and is open."
+          exit 1
+        fi
+
+        echo "Dependency PR branch: ${DEPENDENCY_BRANCH}"
+
+        # Check if the dependency PR is still open
+        DEPENDENCY_STATE=$(gh pr view "$DEPENDENCY_PR" --json state --jq '.state' 2>/dev/null || echo "")
+
+        if [[ "$DEPENDENCY_STATE" == "MERGED" ]]; then
+          echo "Dependency PR #${DEPENDENCY_PR} has been merged. No rebase needed."
+          echo "rebased=false" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        if [[ "$DEPENDENCY_STATE" == "CLOSED" ]]; then
+          echo "::warning::Dependency PR #${DEPENDENCY_PR} is closed but not merged. Consider removing the Depends-On reference."
+          echo "rebased=false" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        # Configure git user for the rebase
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        # Fetch the dependency branch
+        echo "Fetching dependency branch..."
+        git fetch origin "${DEPENDENCY_BRANCH}:refs/remotes/origin/${DEPENDENCY_BRANCH}"
+
+        # Perform the rebase
+        echo "Rebasing current branch onto origin/${DEPENDENCY_BRANCH}..."
+        if git rebase "origin/${DEPENDENCY_BRANCH}"; then
+          echo "Rebase successful!"
+          echo "rebased=true" >> $GITHUB_OUTPUT
+        else
+          echo "::error::Rebase failed. There may be conflicts between this PR and PR #${DEPENDENCY_PR}."
+          git rebase --abort
+          exit 1
+        fi
+
+    - name: Summary
+      if: always()
+      shell: bash
+      run: |
+        DEPENDENCY_PR="${{ steps.find-dependency.outputs.dependency_pr }}"
+        REBASED="${{ steps.rebase.outputs.rebased }}"
+
+        if [[ -z "$DEPENDENCY_PR" ]]; then
+          echo "### Dependency Check" >> $GITHUB_STEP_SUMMARY
+          echo "No dependency found in PR description." >> $GITHUB_STEP_SUMMARY
+          echo "To declare a dependency, add \`Depends-On: #<PR_NUMBER>\` to your PR description." >> $GITHUB_STEP_SUMMARY
+        elif [[ "$REBASED" == "true" ]]; then
+          echo "### Dependency Check" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Successfully rebased onto PR #${DEPENDENCY_PR}" >> $GITHUB_STEP_SUMMARY
+        elif [[ "$REBASED" == "false" ]]; then
+          echo "### Dependency Check" >> $GITHUB_STEP_SUMMARY
+          echo "ℹ️ Dependency PR #${DEPENDENCY_PR} is already merged or closed. No rebase needed." >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### Dependency Check" >> $GITHUB_STEP_SUMMARY
+          echo "❌ Failed to rebase onto PR #${DEPENDENCY_PR}" >> $GITHUB_STEP_SUMMARY
+        fi
+
