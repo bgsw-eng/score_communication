@@ -29,11 +29,27 @@ on:
       SCORE_QNX_PASSWORD:
         required: true
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target'}}
+
 env:
   LICENSE_DIR: "/opt/score_qnx/license"
 jobs:
+    approval:
+      if: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name }}
+      environment: 'workflow-approval'
+      runs-on: ubuntu-24.04
+      permissions:
+        contents: read
+        pull-requests: read
+      steps:
+        - name: Blocking on approval
+          run: ''
+
     build_and_test_qnx:
       name: build_and_test_qnx${{ matrix.identifier }}
+      needs: approval
       strategy:
         fail-fast: false
         matrix:
@@ -57,8 +73,9 @@ jobs:
       permissions:
         contents: read
         pull-requests: read
-      environment: "workflow-approval"
       steps:
+        - name: Echo env
+          run: echo "${{ case(github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name, 'workflow-approval', '') }}"
         - name: Checkout repository
           uses: actions/checkout@v4.2.2
           with:
