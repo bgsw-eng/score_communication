@@ -131,7 +131,7 @@ class MessagePassingServiceInstance : public IMessagePassingServiceInstance
 
     // false-positive: is used to define the size of buffer for handlers
     // coverity[autosar_cpp14_a0_1_1_violation]
-    static constexpr std::uint8_t kMaxReceiveHandlersPerEvent{5U};
+    static constexpr std::uint8_t kMaxReceiveHandlersPerEvent{10U};
 
     // false-positive: is used to define the size of tmp array for node IDs
     // coverity[autosar_cpp14_a0_1_1_violation]
